@@ -7,8 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../../global/eden_gallery_default_background_store.dart';
 import '../../global/eden_gallery_favorites_store.dart';
 import '../../global/eden_gallery_player_globals.dart';
+import '../EdenDefaultBackgroundPage/eden_default_background_page.dart';
 
 typedef _JsonMap = Map<String, dynamic>;
 
@@ -50,6 +52,9 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
       const <_RemoteGalleryCharacter>[];
   Set<int> _favoriteCharacterIds = <int>{};
   Map<int, int> _characterOrderByCardId = const <int, int>{};
+  List<EdenDefaultBackgroundOption> _defaultBackgroundOptions =
+      const <EdenDefaultBackgroundOption>[];
+  String? _defaultBackgroundPath;
   Map<String, Object?> _currentConfig = const <String, Object?>{};
   Map<String, Object?>? _pendingConfig;
   Uri? _playerUri;
@@ -110,6 +115,8 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   Future<List<_RemoteGalleryCharacter>> _bootstrapPlayer() async {
     _favoriteCharacterIds =
         await EdenGalleryFavoritesStore.loadFavoriteCardIds();
+    _defaultBackgroundPath =
+        await EdenGalleryDefaultBackgroundStore.loadDefaultBackgroundPath();
     await _ensureServerRoot();
     await _loadInitialPlayer();
     return _loadCharacters();
@@ -139,6 +146,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     final Map<String, dynamic> manifest = await _fetchJson(manifestUri);
     final Map<int, List<_RemoteVoiceLine>> voicesByCardId =
         await _loadVoicesByCardId();
+    _defaultBackgroundOptions = await _loadDefaultBackgroundOptions();
     final List<dynamic> rawCharacters =
         manifest['characters'] as List<dynamic>? ?? <dynamic>[];
     final List<_RemoteGalleryCharacter> characters = rawCharacters
@@ -160,6 +168,53 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     };
     _loadedCharacters = _sortCharacters(characters);
     return _loadedCharacters;
+  }
+
+  Future<List<EdenDefaultBackgroundOption>>
+  _loadDefaultBackgroundOptions() async {
+    final Uri assetsUri = _buildServiceUri(
+      '/gallery-assets/file/character_assets_manifest.json',
+    );
+    final Map<String, dynamic> manifest = await _fetchJson(assetsUri);
+    final Object? rawFolders = manifest['folders'];
+    if (rawFolders is! Map) {
+      return const <EdenDefaultBackgroundOption>[];
+    }
+
+    final List<EdenDefaultBackgroundOption> options =
+        <EdenDefaultBackgroundOption>[];
+    for (final dynamic rawFolder in rawFolders.values) {
+      if (rawFolder is! Map) {
+        continue;
+      }
+      final List<String> backgroundFiles =
+          (rawFolder['files'] as List<dynamic>? ?? <dynamic>[])
+              .whereType<Map<String, dynamic>>()
+              .where((_JsonMap file) {
+                final String type = file['type']?.toString() ?? '';
+                final String path = file['file']?.toString() ?? '';
+                return type == 'background' && _isImagePath(path);
+              })
+              .map((Map<String, dynamic> file) => file['file'].toString())
+              .toSet()
+              .toList()
+            ..sort();
+      if (backgroundFiles.length != 1) {
+        continue;
+      }
+      final String path = '/gallery-assets/file/${backgroundFiles.single}';
+      options.add(
+        EdenDefaultBackgroundOption(
+          path: path,
+          imageUrl: _buildServiceUri(path).toString(),
+        ),
+      );
+    }
+    options.sort(
+      (EdenDefaultBackgroundOption a, EdenDefaultBackgroundOption b) =>
+          a.path.compareTo(b.path),
+    );
+    return options;
   }
 
   Future<Map<int, List<_RemoteVoiceLine>>> _loadVoicesByCardId() async {
@@ -283,6 +338,19 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
       return;
     }
 
+    if (decodedPath == _embedPath) {
+      final String html = await _loadPatchedEmbedHtml();
+      final List<int> bytes = utf8.encode(html);
+      response.statusCode = HttpStatus.ok;
+      response.headers.contentType = ContentType.html;
+      response.contentLength = bytes.length;
+      if (request.method != 'HEAD') {
+        response.add(bytes);
+      }
+      await response.close();
+      return;
+    }
+
     final String assetPath = '$_assetRoot$decodedPath';
     try {
       final ByteData data = await rootBundle.load(assetPath);
@@ -304,6 +372,47 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     } finally {
       await response.close();
     }
+  }
+
+  Future<String> _loadPatchedEmbedHtml() async {
+    final String html = await rootBundle.loadString(_embedAsset);
+    const String original = '''
+        function staticBackgroundPaths(stage) {
+            const rendered = playerRenderedStaticPaths(stage);
+            return (stage.backgroundPaths || []).filter(function (path) {
+                return typeof path === 'string' && path && !rendered.has(path);
+            });
+        }
+''';
+    const String replacement = '''
+        function defaultBackgroundPaths(stage) {
+            if (Array.isArray(stage && stage.backgroundPaths) && stage.backgroundPaths.length > 0) {
+                return [];
+            }
+            const configuredPath = firstString([
+                state.config && state.config.defaultBackgroundPath,
+                state.config && state.config.defaultBackground,
+            ]);
+            return configuredPath ? [configuredPath] : [];
+        }
+
+        function staticBackgroundPaths(stage) {
+            const rendered = playerRenderedStaticPaths(stage);
+            const paths = (stage.backgroundPaths || []).length
+                ? (stage.backgroundPaths || [])
+                : defaultBackgroundPaths(stage);
+            return paths.filter(function (path) {
+                return typeof path === 'string' && path && !rendered.has(path);
+            });
+        }
+''';
+    if (!html.contains(original)) {
+      debugPrint(
+        '[EdenRemotePlayer][embed-patch] staticBackgroundPaths not found',
+      );
+      return html;
+    }
+    return html.replaceFirst(original, replacement);
   }
 
   WebViewController _createController() {
@@ -757,6 +866,16 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     }
     result['cardId'] = character.cardId;
     result['stageIndex'] = stageIndex;
+    result['defaultBackgroundPath'] = null;
+    result['defaultBackground'] = null;
+    final _RemoteGalleryStage stage =
+        character.stages[stageIndex.clamp(0, character.stages.length - 1)];
+    final String? defaultBackgroundPath = _defaultBackgroundPath;
+    if (stage.backgroundPaths.isEmpty &&
+        defaultBackgroundPath != null &&
+        defaultBackgroundPath.isNotEmpty) {
+      result['defaultBackgroundPath'] = defaultBackgroundPath;
+    }
     if (!result.containsKey('showStatus')) {
       result['showStatus'] = widget.config['showStatus'] ?? true;
     }
@@ -777,6 +896,40 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     setState(() {
       _chromeVisible = visible;
     });
+  }
+
+  Future<void> _openDefaultBackgroundPage() async {
+    final String? result = await Navigator.of(context).push<String?>(
+      MaterialPageRoute<String?>(
+        builder:
+            (BuildContext context) => EdenDefaultBackgroundPage(
+              options: _defaultBackgroundOptions,
+              selectedPath: _defaultBackgroundPath,
+            ),
+      ),
+    );
+    if (!mounted || result == null) {
+      return;
+    }
+
+    final String? nextPath = result.isEmpty ? null : result;
+    setState(() {
+      _defaultBackgroundPath = nextPath;
+    });
+
+    try {
+      await EdenGalleryDefaultBackgroundStore.saveDefaultBackgroundPath(
+        nextPath,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[EdenRemotePlayer][default-background-save-error] $error');
+      debugPrint('$stackTrace');
+    }
+
+    final _RemoteGalleryCharacter? character = _selectedCharacterForVoice();
+    if (character != null) {
+      await _loadConfig(_configFor(character, _selectedStageIndex));
+    }
   }
 
   @override
@@ -840,6 +993,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                 chromeVisible: _chromeVisible,
                 subtitleText: subtitleText,
                 favoriteCharacterIds: _favoriteCharacterIds,
+                onDefaultBackgroundPressed: _openDefaultBackgroundPage,
                 assetUrlBuilder: _remoteAssetUrl,
                 onCharacterSelected: (int index) {
                   _selectCharacter(characters, index);
@@ -1021,6 +1175,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
     required this.onCharacterSelected,
     required this.onStageSelected,
     required this.onFavoriteToggled,
+    required this.onDefaultBackgroundPressed,
     required this.onChromeVisibilityChanged,
   });
 
@@ -1036,6 +1191,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
   final ValueChanged<int> onCharacterSelected;
   final ValueChanged<int> onStageSelected;
   final ValueChanged<_RemoteGalleryCharacter> onFavoriteToggled;
+  final VoidCallback onDefaultBackgroundPressed;
   final ValueChanged<bool> onChromeVisibilityChanged;
 
   @override
@@ -1062,6 +1218,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
                   stage: selectedStage,
                   stageIndex: selectedStageIndex,
                   onStageSelected: onStageSelected,
+                  onDefaultBackgroundPressed: onDefaultBackgroundPressed,
                 ),
               ),
             ),
@@ -1175,12 +1332,14 @@ class _CharacterInfoPanel extends StatelessWidget {
     required this.stage,
     required this.stageIndex,
     required this.onStageSelected,
+    required this.onDefaultBackgroundPressed,
   });
 
   final _RemoteGalleryCharacter character;
   final _RemoteGalleryStage stage;
   final int stageIndex;
   final ValueChanged<int> onStageSelected;
+  final VoidCallback onDefaultBackgroundPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -1244,6 +1403,26 @@ class _CharacterInfoPanel extends StatelessWidget {
               }),
             ),
           ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: 44,
+            height: 44,
+            child: FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: EdenGalleryPlayerGlobals.panelBackgroundColor,
+                foregroundColor: EdenGalleryPlayerGlobals.themeColor,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  side: const BorderSide(
+                    color: EdenGalleryPlayerGlobals.panelBorderColor,
+                  ),
+                ),
+                padding: EdgeInsets.zero,
+              ),
+              onPressed: onDefaultBackgroundPressed,
+              child: const Icon(Icons.settings_rounded, size: 24),
+            ),
+          ),
         ],
       ),
     );
@@ -1753,19 +1932,27 @@ class _RemoteGalleryStage {
     required this.folder,
     required this.stageName,
     required this.stageKey,
+    required this.backgroundPaths,
   });
 
   factory _RemoteGalleryStage.fromJson(Map<String, dynamic> json) {
+    final List<dynamic> rawBackgroundPaths =
+        json['backgroundPaths'] as List<dynamic>? ?? <dynamic>[];
     return _RemoteGalleryStage(
       folder: json['folder']?.toString() ?? '',
       stageName: json['stageName']?.toString() ?? '',
       stageKey: json['stageKey']?.toString() ?? '',
+      backgroundPaths: rawBackgroundPaths
+          .map((dynamic path) => path.toString())
+          .where((String path) => path.isNotEmpty)
+          .toList(growable: false),
     );
   }
 
   final String folder;
   final String stageName;
   final String stageKey;
+  final List<String> backgroundPaths;
 }
 
 int _asInt(Object? value) {
@@ -1786,4 +1973,12 @@ String? _firstNonEmptyString(List<Object?> values) {
     }
   }
   return null;
+}
+
+bool _isImagePath(String path) {
+  final String lower = path.toLowerCase();
+  return lower.endsWith('.png') ||
+      lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.webp');
 }
