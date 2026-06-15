@@ -7,9 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-typedef _JsonMap = Map<String, dynamic>;
+import '../../global/eden_gallery_player_globals.dart';
 
-enum _SubtitleLanguage { chinese, japanese }
+typedef _JsonMap = Map<String, dynamic>;
 
 class EdenRemotePlayerPage extends StatefulWidget {
   const EdenRemotePlayerPage({
@@ -32,7 +32,8 @@ class EdenRemotePlayerPage extends StatefulWidget {
 }
 
 class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
-  static const Color _backgroundColor = Color(0xFF080B12);
+  static const Color _backgroundColor =
+      EdenGalleryPlayerGlobals.pageBackgroundColor;
   static const String _assetRoot = 'assets/gallery_player';
   static const String _embedAsset =
       '$_assetRoot/gallery-assets/spine_player/embed.html';
@@ -55,7 +56,6 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   bool _chromeVisible = true;
   String? _error;
   _RemoteVoiceLine? _subtitleVoiceLine;
-  final _SubtitleLanguage _subtitleLanguage = _SubtitleLanguage.chinese;
   int _selectedCharacterIndex = 0;
   int _selectedStageIndex = 0;
   bool _selectionResolved = false;
@@ -711,7 +711,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   @override
   Widget build(BuildContext context) {
     final String? subtitleText = _subtitleVoiceLine?.subtitleFor(
-      _subtitleLanguage,
+      EdenGalleryPlayerGlobals.subtitleLanguage,
     );
     return Scaffold(
       backgroundColor: _backgroundColor,
@@ -1068,11 +1068,13 @@ class _ChromeToggleButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return FilledButton(
       style: FilledButton.styleFrom(
-        backgroundColor: const Color(0xD90B1018),
-        foregroundColor: Colors.white,
+        backgroundColor: EdenGalleryPlayerGlobals.panelBackgroundColor,
+        foregroundColor: EdenGalleryPlayerGlobals.themeColor,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: Color(0x33FFFFFF)),
+          side: const BorderSide(
+            color: EdenGalleryPlayerGlobals.panelBorderColor,
+          ),
         ),
         padding: EdgeInsets.zero,
       ),
@@ -1155,7 +1157,7 @@ class _CharacterInfoPanel extends StatelessWidget {
                 int index,
               ) {
                 return _StageButton(
-                  label: '立绘${index + 1}',
+                  label: '${index + 1}',
                   selected: index == stageIndex,
                   onTap: () => onStageSelected(index),
                 );
@@ -1182,18 +1184,22 @@ class _StageButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 106,
-      height: 56,
+      width: 40,
+      height: 40,
       child: FilledButton(
         style: FilledButton.styleFrom(
           backgroundColor:
-              selected ? const Color(0xFFF5CB5C) : const Color(0xCC111823),
-          foregroundColor: selected ? const Color(0xFF151515) : Colors.white,
+              selected
+                  ? EdenGalleryPlayerGlobals.themeColor
+                  : const Color(0xCC111823),
+          foregroundColor:Colors.white,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(20),
             side: BorderSide(
               color:
-                  selected ? const Color(0xFFFFE08B) : const Color(0x33FFFFFF),
+                  selected
+                      ? EdenGalleryPlayerGlobals.themeColor
+                      : const Color(0x33FFFFFF),
             ),
           ),
           padding: EdgeInsets.zero,
@@ -1203,7 +1209,7 @@ class _StageButton extends StatelessWidget {
           label,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
         ),
       ),
     );
@@ -1287,7 +1293,9 @@ class _CharacterTile extends StatelessWidget {
             color: const Color(0xCC101823),
             border: Border.all(
               color:
-                  selected ? const Color(0xFFFFD75E) : const Color(0x33FFFFFF),
+                  selected
+                      ? EdenGalleryPlayerGlobals.themeColor
+                      : const Color(0x33FFFFFF),
               width: selected ? 3 : 1,
             ),
             borderRadius: BorderRadius.circular(16),
@@ -1391,7 +1399,6 @@ class _VoiceSubtitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-
     final EdgeInsets padding = MediaQuery.viewPaddingOf(context);
     final double bottom =
         padding.bottom + sideInset + (chromeVisible ? stripHeight + 10 : 0);
@@ -1558,12 +1565,12 @@ class _RemoteVoiceLine {
 
   String get audioPath => '/gallery-assets/voice/$voicePath.wav';
 
-  String subtitleFor(_SubtitleLanguage language) {
+  String subtitleFor(EdenGallerySubtitleLanguage language) {
     switch (language) {
-      case _SubtitleLanguage.chinese:
+      case EdenGallerySubtitleLanguage.chinese:
         return _firstNonEmptyString(<Object?>[textCn, text, nameCn, name]) ??
             voicePath;
-      case _SubtitleLanguage.japanese:
+      case EdenGallerySubtitleLanguage.japanese:
         return _firstNonEmptyString(<Object?>[text, textCn, name, nameCn]) ??
             voicePath;
     }
