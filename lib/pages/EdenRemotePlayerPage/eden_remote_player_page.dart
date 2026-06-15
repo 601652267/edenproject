@@ -2,12 +2,13 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 class EdenRemotePlayerPage extends StatefulWidget {
   const EdenRemotePlayerPage({
     super.key,
-    this.baseUrl = 'http://192.168.1.45:8080',
+    this.baseUrl,
     this.config = const <String, Object?>{
       'cardId': 11100001,
       'stageIndex': 0,
@@ -15,7 +16,9 @@ class EdenRemotePlayerPage extends StatefulWidget {
     },
   });
 
-  final String baseUrl;
+  /// Optional external debug server. When null, the page serves bundled
+  /// gallery assets through an in-app localhost server.
+  final String? baseUrl;
   final Map<String, Object?> config;
 
   @override
@@ -24,10 +27,16 @@ class EdenRemotePlayerPage extends StatefulWidget {
 
 class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   static const Color _backgroundColor = Color(0xFF080B12);
+  static const String _assetRoot = 'assets/gallery_player';
+  static const String _embedAsset =
+      '$_assetRoot/gallery-assets/spine_player/embed.html';
+  static const String _embedPath = '/gallery-assets/spine_player/embed.html';
 
   late final WebViewController _controller;
   late Future<List<_RemoteGalleryCharacter>> _charactersFuture;
 
+  HttpServer? _assetServer;
+  Uri? _serverRoot;
   Map<String, Object?> _currentConfig = const <String, Object?>{};
   Map<String, Object?>? _pendingConfig;
   Uri? _playerUri;
@@ -42,9 +51,8 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   void initState() {
     super.initState();
     _currentConfig = _copyConfig(widget.config);
-    _charactersFuture = _loadCharacters();
     _controller = _createController();
-    _loadInitialPlayer();
+    _charactersFuture = _bootstrapPlayer();
   }
 
   @override
@@ -65,9 +73,8 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
         _pendingConfig = null;
         _isLoading = true;
         _error = null;
-        _charactersFuture = _loadCharacters();
+        _charactersFuture = _restartPlayerService();
       });
-      _loadInitialPlayer();
       return;
     }
 
@@ -82,16 +89,32 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     _loadConfig(_currentConfig);
   }
 
-  void _loadInitialPlayer() {
+  Future<List<_RemoteGalleryCharacter>> _bootstrapPlayer() async {
+    await _ensureServerRoot();
+    await _loadInitialPlayer();
+    return _loadCharacters();
+  }
+
+  Future<List<_RemoteGalleryCharacter>> _restartPlayerService() async {
+    final HttpServer? server = _assetServer;
+    _assetServer = null;
+    _serverRoot = null;
+    await server?.close(force: true);
+    return _bootstrapPlayer();
+  }
+
+  Future<void> _loadInitialPlayer() async {
+    await _ensureServerRoot();
     _apiReady = false;
     _pendingConfig = null;
     _playerUri = _buildPlayerUri(_currentConfig);
     debugPrint('[EdenRemotePlayer][url] $_playerUri');
-    _controller.loadRequest(_playerUri!);
+    await _controller.loadRequest(_playerUri!);
   }
 
   Future<List<_RemoteGalleryCharacter>> _loadCharacters() async {
-    final Uri manifestUri = _buildRemoteUri('/gallery-assets/manifest.json');
+    await _ensureServerRoot();
+    final Uri manifestUri = _buildServiceUri('/gallery-assets/manifest.json');
     debugPrint('[EdenRemotePlayer][manifest] $manifestUri');
     final HttpClient client = HttpClient();
     try {
@@ -122,18 +145,96 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   }
 
   Uri _buildPlayerUri(Map<String, Object?> config) {
-    return _buildRemoteUri(
-      '/gallery-assets/spine_player/embed.html',
+    return _buildServiceUri(
+      _embedPath,
     ).replace(queryParameters: <String, String>{'config': jsonEncode(config)});
   }
 
-  Uri _buildRemoteUri(String path) {
-    final String normalizedBase =
-        widget.baseUrl.endsWith('/')
-            ? widget.baseUrl.substring(0, widget.baseUrl.length - 1)
-            : widget.baseUrl;
+  Uri _buildServiceUri(String path) {
+    final Uri? root = _serverRoot;
+    if (root == null) {
+      throw StateError('Eden gallery asset service is not ready.');
+    }
     final String normalizedPath = path.startsWith('/') ? path : '/$path';
-    return Uri.parse('$normalizedBase$normalizedPath');
+    return root.replace(path: normalizedPath);
+  }
+
+  Future<void> _ensureServerRoot() async {
+    if (_serverRoot != null) {
+      return;
+    }
+
+    final String? externalBaseUrl = widget.baseUrl;
+    if (externalBaseUrl != null && externalBaseUrl.trim().isNotEmpty) {
+      final String normalizedBase =
+          externalBaseUrl.endsWith('/')
+              ? externalBaseUrl.substring(0, externalBaseUrl.length - 1)
+              : externalBaseUrl;
+      _serverRoot = Uri.parse(normalizedBase);
+      return;
+    }
+
+    await rootBundle.loadString(_embedAsset);
+    final HttpServer server = await HttpServer.bind(
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    _assetServer = server;
+    _serverRoot = Uri.parse('http://127.0.0.1:${server.port}');
+    server.listen(_handleAssetRequest);
+    debugPrint('[EdenRemotePlayer][asset-server] $_serverRoot');
+  }
+
+  Future<void> _handleAssetRequest(HttpRequest request) async {
+    final HttpResponse response = request.response;
+    response.headers.set('Access-Control-Allow-Origin', '*');
+    response.headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    response.headers.set('Access-Control-Allow-Headers', '*');
+
+    if (request.method == 'OPTIONS') {
+      response.statusCode = HttpStatus.noContent;
+      await response.close();
+      return;
+    }
+
+    if (request.method != 'GET' && request.method != 'HEAD') {
+      response.statusCode = HttpStatus.methodNotAllowed;
+      await response.close();
+      return;
+    }
+
+    final String decodedPath = Uri.decodeComponent(
+      request.uri.path.isEmpty || request.uri.path == '/'
+          ? _embedPath
+          : request.uri.path,
+    );
+    if (decodedPath.contains('..') || decodedPath.contains(r'\')) {
+      response.statusCode = HttpStatus.forbidden;
+      await response.close();
+      return;
+    }
+
+    final String assetPath = '$_assetRoot$decodedPath';
+    try {
+      final ByteData data = await rootBundle.load(assetPath);
+      final Uint8List bytes = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      response.statusCode = HttpStatus.ok;
+      response.headers.contentType = _contentTypeFor(assetPath);
+      response.contentLength = bytes.length;
+      if (request.method != 'HEAD') {
+        response.add(bytes);
+      }
+    } catch (error) {
+      debugPrint('[EdenRemotePlayer][asset-404] $assetPath $error');
+      response.statusCode = HttpStatus.notFound;
+      response.headers.contentType = ContentType.text;
+      response.write('Not found: $assetPath');
+    } finally {
+      await response.close();
+    }
   }
 
   WebViewController _createController() {
@@ -361,7 +462,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     if (path == null || path.isEmpty) {
       return null;
     }
-    return _buildRemoteUri(path).toString();
+    return _buildServiceUri(path).toString();
   }
 
   @override
@@ -407,7 +508,6 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                   selected.stages[safeStageIndex];
 
               return _RemotePlayerScaffold(
-                baseUrl: widget.baseUrl,
                 characters: characters,
                 selectedCharacterIndex: safeCharacterIndex,
                 selectedStageIndex: safeStageIndex,
@@ -437,7 +537,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Text(
-                    '远端立绘页面加载失败\n$_error\n$_playerUri',
+                    '立绘页面加载失败\n$_error\n$_playerUri',
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white, fontSize: 13),
                   ),
@@ -476,6 +576,64 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     }
     final String text = value.toString();
     return text.isEmpty ? null : text;
+  }
+
+  ContentType _contentTypeFor(String assetPath) {
+    final String path = assetPath.toLowerCase();
+    if (path.endsWith('.html')) {
+      return ContentType.html;
+    }
+    if (path.endsWith('.js')) {
+      return ContentType('application', 'javascript', charset: 'utf-8');
+    }
+    if (path.endsWith('.css')) {
+      return ContentType('text', 'css', charset: 'utf-8');
+    }
+    if (path.endsWith('.json')) {
+      return ContentType.json;
+    }
+    if (path.endsWith('.png')) {
+      return ContentType('image', 'png');
+    }
+    if (path.endsWith('.jpg') || path.endsWith('.jpeg')) {
+      return ContentType('image', 'jpeg');
+    }
+    if (path.endsWith('.webp')) {
+      return ContentType('image', 'webp');
+    }
+    if (path.endsWith('.gif')) {
+      return ContentType('image', 'gif');
+    }
+    if (path.endsWith('.wav')) {
+      return ContentType('audio', 'wav');
+    }
+    if (path.endsWith('.mp3')) {
+      return ContentType('audio', 'mpeg');
+    }
+    if (path.endsWith('.ogg')) {
+      return ContentType('audio', 'ogg');
+    }
+    if (path.endsWith('.m4a') || path.endsWith('.aac')) {
+      return ContentType('audio', 'aac');
+    }
+    if (path.endsWith('.ico')) {
+      return ContentType('image', 'x-icon');
+    }
+    if (path.endsWith('.wasm')) {
+      return ContentType('application', 'wasm');
+    }
+    if (path.endsWith('.atlas') ||
+        path.endsWith('.prefab') ||
+        path.endsWith('.txt')) {
+      return ContentType.text;
+    }
+    return ContentType.binary;
+  }
+
+  @override
+  void dispose() {
+    _assetServer?.close(force: true);
+    super.dispose();
   }
 }
 
@@ -522,7 +680,6 @@ class _RemotePlayerEvent {
 
 class _RemotePlayerScaffold extends StatefulWidget {
   const _RemotePlayerScaffold({
-    required this.baseUrl,
     required this.characters,
     required this.selectedCharacterIndex,
     required this.selectedStageIndex,
@@ -533,7 +690,6 @@ class _RemotePlayerScaffold extends StatefulWidget {
     required this.onStageSelected,
   });
 
-  final String baseUrl;
   final List<_RemoteGalleryCharacter> characters;
   final int selectedCharacterIndex;
   final int selectedStageIndex;
