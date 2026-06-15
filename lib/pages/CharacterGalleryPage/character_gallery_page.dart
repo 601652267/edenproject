@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-
+// 348654518
+// 592221588
+// 864602675
 import '../../unitls/commonManager.dart';
 
 part 'subView/character_gallery_scene.dart';
