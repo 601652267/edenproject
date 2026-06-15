@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../../global/eden_gallery_favorites_store.dart';
 import '../../global/eden_gallery_player_globals.dart';
 
 typedef _JsonMap = Map<String, dynamic>;
@@ -47,6 +48,8 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   Uri? _serverRoot;
   List<_RemoteGalleryCharacter> _loadedCharacters =
       const <_RemoteGalleryCharacter>[];
+  Set<int> _favoriteCharacterIds = <int>{};
+  Map<int, int> _characterOrderByCardId = const <int, int>{};
   Map<String, Object?> _currentConfig = const <String, Object?>{};
   Map<String, Object?>? _pendingConfig;
   Uri? _playerUri;
@@ -105,6 +108,8 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   }
 
   Future<List<_RemoteGalleryCharacter>> _bootstrapPlayer() async {
+    _favoriteCharacterIds =
+        await EdenGalleryFavoritesStore.loadFavoriteCardIds();
     await _ensureServerRoot();
     await _loadInitialPlayer();
     return _loadCharacters();
@@ -149,8 +154,12 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
           return character.stages.isNotEmpty;
         })
         .toList(growable: false);
-    _loadedCharacters = characters;
-    return characters;
+    _characterOrderByCardId = <int, int>{
+      for (int index = 0; index < characters.length; index += 1)
+        characters[index].cardId: index,
+    };
+    _loadedCharacters = _sortCharacters(characters);
+    return _loadedCharacters;
   }
 
   Future<Map<int, List<_RemoteVoiceLine>>> _loadVoicesByCardId() async {
@@ -636,6 +645,68 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     _selectionResolved = true;
   }
 
+  List<_RemoteGalleryCharacter> _sortCharacters(
+    List<_RemoteGalleryCharacter> characters, {
+    Set<int>? favoriteCharacterIds,
+  }) {
+    final Set<int> favoriteIds = favoriteCharacterIds ?? _favoriteCharacterIds;
+    final List<_RemoteGalleryCharacter> sorted =
+        List<_RemoteGalleryCharacter>.of(characters);
+    sorted.sort((_RemoteGalleryCharacter a, _RemoteGalleryCharacter b) {
+      final bool aFavorite = favoriteIds.contains(a.cardId);
+      final bool bFavorite = favoriteIds.contains(b.cardId);
+      if (aFavorite != bFavorite) {
+        return aFavorite ? -1 : 1;
+      }
+      final int aOrder = _characterOrderByCardId[a.cardId] ?? a.cardId;
+      final int bOrder = _characterOrderByCardId[b.cardId] ?? b.cardId;
+      return aOrder.compareTo(bOrder);
+    });
+    return sorted;
+  }
+
+  int _indexForCardId(List<_RemoteGalleryCharacter> characters, int cardId) {
+    final int index = characters.indexWhere(
+      (_RemoteGalleryCharacter character) => character.cardId == cardId,
+    );
+    return index < 0 ? 0 : index;
+  }
+
+  Future<void> _toggleFavoriteCharacter(
+    _RemoteGalleryCharacter character,
+  ) async {
+    final int? selectedCardId = _selectedCharacterForVoice()?.cardId;
+    final Set<int> nextFavorites = Set<int>.of(_favoriteCharacterIds);
+    if (!nextFavorites.add(character.cardId)) {
+      nextFavorites.remove(character.cardId);
+    }
+    final List<_RemoteGalleryCharacter> sortedCharacters = _sortCharacters(
+      _loadedCharacters,
+      favoriteCharacterIds: nextFavorites,
+    );
+
+    setState(() {
+      _favoriteCharacterIds = nextFavorites;
+      _loadedCharacters = sortedCharacters;
+      _selectedCharacterIndex =
+          selectedCardId == null
+              ? _selectedCharacterIndex.clamp(0, _loadedCharacters.length - 1)
+              : _indexForCardId(_loadedCharacters, selectedCardId);
+      _charactersFuture = Future<List<_RemoteGalleryCharacter>>.value(
+        _loadedCharacters,
+      );
+    });
+
+    try {
+      await EdenGalleryFavoritesStore.saveFavoriteCardIds(
+        _favoriteCharacterIds,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[EdenRemotePlayer][favorite-save-error] $error');
+      debugPrint('$stackTrace');
+    }
+  }
+
   void _selectCharacter(List<_RemoteGalleryCharacter> characters, int index) {
     final int safeIndex = index.clamp(0, characters.length - 1);
     final _RemoteGalleryCharacter character = characters[safeIndex];
@@ -726,6 +797,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
           ),
           FutureBuilder<List<_RemoteGalleryCharacter>>(
             future: _charactersFuture,
+            initialData: _loadedCharacters.isEmpty ? null : _loadedCharacters,
             builder: (
               BuildContext context,
               AsyncSnapshot<List<_RemoteGalleryCharacter>> snapshot,
@@ -767,6 +839,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                 selectedStage: selectedStage,
                 chromeVisible: _chromeVisible,
                 subtitleText: subtitleText,
+                favoriteCharacterIds: _favoriteCharacterIds,
                 assetUrlBuilder: _remoteAssetUrl,
                 onCharacterSelected: (int index) {
                   _selectCharacter(characters, index);
@@ -774,6 +847,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                 onStageSelected: (int index) {
                   _selectStage(selected, index);
                 },
+                onFavoriteToggled: _toggleFavoriteCharacter,
                 onChromeVisibilityChanged: _setChromeVisible,
               );
             },
@@ -942,9 +1016,11 @@ class _RemotePlayerScaffold extends StatelessWidget {
     required this.selectedStage,
     required this.chromeVisible,
     required this.subtitleText,
+    required this.favoriteCharacterIds,
     required this.assetUrlBuilder,
     required this.onCharacterSelected,
     required this.onStageSelected,
+    required this.onFavoriteToggled,
     required this.onChromeVisibilityChanged,
   });
 
@@ -955,9 +1031,11 @@ class _RemotePlayerScaffold extends StatelessWidget {
   final _RemoteGalleryStage selectedStage;
   final bool chromeVisible;
   final String? subtitleText;
+  final Set<int> favoriteCharacterIds;
   final String? Function(String? path) assetUrlBuilder;
   final ValueChanged<int> onCharacterSelected;
   final ValueChanged<int> onStageSelected;
+  final ValueChanged<_RemoteGalleryCharacter> onFavoriteToggled;
   final ValueChanged<bool> onChromeVisibilityChanged;
 
   @override
@@ -1001,10 +1079,12 @@ class _RemotePlayerScaffold extends StatelessWidget {
                       child: _CharacterStrip(
                         characters: characters,
                         selectedIndex: selectedCharacterIndex,
+                        favoriteCharacterIds: favoriteCharacterIds,
                         tileWidth: tileWidth,
                         tileImageHeight: tileImageHeight,
                         assetUrlBuilder: assetUrlBuilder,
                         onSelected: onCharacterSelected,
+                        onFavoriteToggled: onFavoriteToggled,
                       ),
                     ),
                   ),
@@ -1192,7 +1272,7 @@ class _StageButton extends StatelessWidget {
               selected
                   ? EdenGalleryPlayerGlobals.themeColor
                   : const Color(0xCC111823),
-          foregroundColor:Colors.white,
+          foregroundColor: Colors.white,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
             side: BorderSide(
@@ -1220,18 +1300,22 @@ class _CharacterStrip extends StatelessWidget {
   const _CharacterStrip({
     required this.characters,
     required this.selectedIndex,
+    required this.favoriteCharacterIds,
     required this.tileWidth,
     required this.tileImageHeight,
     required this.assetUrlBuilder,
     required this.onSelected,
+    required this.onFavoriteToggled,
   });
 
   final List<_RemoteGalleryCharacter> characters;
   final int selectedIndex;
+  final Set<int> favoriteCharacterIds;
   final double tileWidth;
   final double tileImageHeight;
   final String? Function(String? path) assetUrlBuilder;
   final ValueChanged<int> onSelected;
+  final ValueChanged<_RemoteGalleryCharacter> onFavoriteToggled;
 
   @override
   Widget build(BuildContext context) {
@@ -1253,10 +1337,12 @@ class _CharacterStrip extends StatelessWidget {
           return _CharacterTile(
             character: character,
             selected: index == selectedIndex,
+            favorite: favoriteCharacterIds.contains(character.cardId),
             width: tileWidth,
             imageHeight: tileImageHeight,
             imageUrl: assetUrlBuilder(character.portraitPath),
             onTap: () => onSelected(index),
+            onFavoriteToggled: () => onFavoriteToggled(character),
           );
         },
       ),
@@ -1268,18 +1354,22 @@ class _CharacterTile extends StatelessWidget {
   const _CharacterTile({
     required this.character,
     required this.selected,
+    required this.favorite,
     required this.width,
     required this.imageHeight,
     required this.imageUrl,
     required this.onTap,
+    required this.onFavoriteToggled,
   });
 
   final _RemoteGalleryCharacter character;
   final bool selected;
+  final bool favorite;
   final double width;
   final double imageHeight;
   final String? imageUrl;
   final VoidCallback onTap;
+  final VoidCallback onFavoriteToggled;
 
   @override
   Widget build(BuildContext context) {
@@ -1352,9 +1442,48 @@ class _CharacterTile extends StatelessWidget {
                     ),
                   ),
                 ),
+                Positioned(
+                  right: 6,
+                  bottom: 28,
+                  child: _FavoriteButton(
+                    favorite: favorite,
+                    onTap: onFavoriteToggled,
+                  ),
+                ),
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FavoriteButton extends StatelessWidget {
+  const _FavoriteButton({required this.favorite, required this.onTap});
+
+  final bool favorite;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color =
+        favorite
+            ? EdenGalleryPlayerGlobals.themeColor
+            : const Color(0xFF9AA3AF);
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xB3000000),
+            border: Border.all(color: const Color(0x40FFFFFF)),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Icon(Icons.favorite_rounded, color: color, size: 20),
         ),
       ),
     );
