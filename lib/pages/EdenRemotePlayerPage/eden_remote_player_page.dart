@@ -11,6 +11,7 @@ import '../../global/eden_gallery_default_background_store.dart';
 import '../../global/eden_gallery_favorites_store.dart';
 import '../../global/eden_gallery_player_globals.dart';
 import '../EdenDefaultBackgroundPage/eden_default_background_page.dart';
+import '../EdenRemotePlayerSettingsPage/eden_remote_player_settings_page.dart';
 
 typedef _JsonMap = Map<String, dynamic>;
 
@@ -72,7 +73,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
   @override
   void initState() {
     super.initState();
-    _currentConfig = _copyConfig(widget.config);
+    _currentConfig = _configWithStoredDefaultBackground(widget.config);
     _controller = _createController();
     _charactersFuture = _bootstrapPlayer();
   }
@@ -87,7 +88,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
       return;
     }
 
-    _currentConfig = _copyConfig(widget.config);
+    _currentConfig = _configWithStoredDefaultBackground(widget.config);
     _selectionResolved = false;
     if (baseChanged) {
       _stopVoicePlayback();
@@ -117,6 +118,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
         await EdenGalleryFavoritesStore.loadFavoriteCardIds();
     _defaultBackgroundPath =
         await EdenGalleryDefaultBackgroundStore.loadDefaultBackgroundPath();
+    _currentConfig = _configWithStoredDefaultBackground(_currentConfig);
     await _ensureServerRoot();
     await _loadInitialPlayer();
     return _loadCharacters();
@@ -882,6 +884,19 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     return result;
   }
 
+  Map<String, Object?> _configWithStoredDefaultBackground(
+    Map<String, Object?> config,
+  ) {
+    final Map<String, Object?> result = _copyConfig(config);
+    result['defaultBackgroundPath'] = null;
+    result['defaultBackground'] = null;
+    final String? defaultBackgroundPath = _defaultBackgroundPath;
+    if (defaultBackgroundPath != null && defaultBackgroundPath.isNotEmpty) {
+      result['defaultBackgroundPath'] = defaultBackgroundPath;
+    }
+    return result;
+  }
+
   String? _remoteAssetUrl(String? path) {
     if (path == null || path.isEmpty) {
       return null;
@@ -898,13 +913,13 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     });
   }
 
-  Future<void> _openDefaultBackgroundPage() async {
+  Future<void> _openSettingsPage() async {
     final String? result = await Navigator.of(context).push<String?>(
       MaterialPageRoute<String?>(
         builder:
-            (BuildContext context) => EdenDefaultBackgroundPage(
-              options: _defaultBackgroundOptions,
-              selectedPath: _defaultBackgroundPath,
+            (BuildContext context) => EdenRemotePlayerSettingsPage(
+              defaultBackgroundOptions: _defaultBackgroundOptions,
+              selectedDefaultBackgroundPath: _defaultBackgroundPath,
             ),
       ),
     );
@@ -913,6 +928,9 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
     }
 
     final String? nextPath = result.isEmpty ? null : result;
+    if (nextPath == _defaultBackgroundPath) {
+      return;
+    }
     setState(() {
       _defaultBackgroundPath = nextPath;
     });
@@ -993,7 +1011,7 @@ class _EdenRemotePlayerPageState extends State<EdenRemotePlayerPage> {
                 chromeVisible: _chromeVisible,
                 subtitleText: subtitleText,
                 favoriteCharacterIds: _favoriteCharacterIds,
-                onDefaultBackgroundPressed: _openDefaultBackgroundPage,
+                onSettingsPressed: _openSettingsPage,
                 assetUrlBuilder: _remoteAssetUrl,
                 onCharacterSelected: (int index) {
                   _selectCharacter(characters, index);
@@ -1175,7 +1193,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
     required this.onCharacterSelected,
     required this.onStageSelected,
     required this.onFavoriteToggled,
-    required this.onDefaultBackgroundPressed,
+    required this.onSettingsPressed,
     required this.onChromeVisibilityChanged,
   });
 
@@ -1191,7 +1209,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
   final ValueChanged<int> onCharacterSelected;
   final ValueChanged<int> onStageSelected;
   final ValueChanged<_RemoteGalleryCharacter> onFavoriteToggled;
-  final VoidCallback onDefaultBackgroundPressed;
+  final VoidCallback onSettingsPressed;
   final ValueChanged<bool> onChromeVisibilityChanged;
 
   @override
@@ -1218,7 +1236,7 @@ class _RemotePlayerScaffold extends StatelessWidget {
                   stage: selectedStage,
                   stageIndex: selectedStageIndex,
                   onStageSelected: onStageSelected,
-                  onDefaultBackgroundPressed: onDefaultBackgroundPressed,
+                  onSettingsPressed: onSettingsPressed,
                 ),
               ),
             ),
@@ -1332,14 +1350,14 @@ class _CharacterInfoPanel extends StatelessWidget {
     required this.stage,
     required this.stageIndex,
     required this.onStageSelected,
-    required this.onDefaultBackgroundPressed,
+    required this.onSettingsPressed,
   });
 
   final _RemoteGalleryCharacter character;
   final _RemoteGalleryStage stage;
   final int stageIndex;
   final ValueChanged<int> onStageSelected;
-  final VoidCallback onDefaultBackgroundPressed;
+  final VoidCallback onSettingsPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -1419,7 +1437,7 @@ class _CharacterInfoPanel extends StatelessWidget {
                 ),
                 padding: EdgeInsets.zero,
               ),
-              onPressed: onDefaultBackgroundPressed,
+              onPressed: onSettingsPressed,
               child: const Icon(Icons.settings_rounded, size: 24),
             ),
           ),
